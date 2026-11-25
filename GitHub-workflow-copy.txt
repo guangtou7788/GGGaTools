@@ -1,0 +1,25 @@
+name: Build GGGaTools
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Show Xcode version
+        run: xcodebuild -version
+      - name: Build iOS dynamic library
+        run: bash build.sh
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          name: GGGaTools-iOS-arm64
+          path: build/
+          if-no-files-found: error
+          retention-days: 14
