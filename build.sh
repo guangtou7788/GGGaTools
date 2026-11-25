@@ -11,7 +11,7 @@ xcrun --sdk iphoneos clang \
   -isysroot "$SDK_PATH" -arch arm64 -miphoneos-version-min=13.0 \
   -dynamiclib -fobjc-arc -fblocks -O2 -Wall -Wextra \
   -Wno-unused-parameter -Wno-deprecated-declarations \
-  -framework Foundation -framework UIKit -framework QuartzCore \
+  -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
   -Wl,-install_name,@rpath/GGGaTools.dylib \
   -Wl,-compatibility_version,1.0 -Wl,-current_version,0.1.0 \
   GGGaTools.m -o build/GGGaTools.dylib
