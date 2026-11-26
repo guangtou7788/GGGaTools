@@ -13,7 +13,7 @@ xcrun --sdk iphoneos clang \
   -Wno-unused-parameter -Wno-deprecated-declarations \
   -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
   -Wl,-install_name,@rpath/GGGaTools.dylib \
-  -Wl,-compatibility_version,1.0 -Wl,-current_version,0.3.0 \
+  -Wl,-compatibility_version,1.0 -Wl,-current_version,0.3.1 \
   GGGaTools.m -o build/GGGaTools.dylib
 # Ad-hoc signature for the artifact. ESign must sign it again with the target IPA.
 codesign --force --sign - build/GGGaTools.dylib

@@ -8,10 +8,20 @@
 // A diagnostic build: no message contents or recipient identifiers are logged.
 static NSString *const GGGaDirectText = @"【GGGaTools测试】这是一条插件直接发送的测试消息";
 static atomic_int GGGaNativeSendCount;
+static atomic_int GGGaListenerSendHits;
+static atomic_int GGGaBlockSendHits;
+static atomic_int GGGaSendWrongType;
+static atomic_int GGGaSendMissingSession;
+static atomic_int GGGaSendMissingReceivers;
+static atomic_int GGGaSendOtherContent;
+static atomic_int GGGaIncomingHits;
+static atomic_int GGGaIncomingOtherType;
+static atomic_int GGGaIncomingOwn;
+static atomic_int GGGaIncomingNoText;
+static atomic_int GGGaIncomingTextHits;
 static BOOL GGGaSendHookInstalled;
 static BOOL GGGaBlockSendHookInstalled;
 static BOOL GGGaIncomingHookInstalled;
-static BOOL GGGaInternalSend;
 static char GGGaInternalRequestKey;
 static id GGGaTextTemplate;
 static id GGGaImageTemplate;
@@ -39,14 +49,30 @@ static void GGGaSetNumber(id object, SEL selector, long long value) {
     if (object && [object respondsToSelector:selector]) ((void (*)(id, SEL, long long))objc_msgSend)(object, selector, value);
 }
 static void GGGaCaptureSend(id service, id request, BOOL usesBlock) {
-    if (GGGaInternalSend || objc_getAssociatedObject(request, &GGGaInternalRequestKey) ||
-        ![request isKindOfClass:NSClassFromString(@"AIMPubMsgSendMessage")]) return;
+    if (request && objc_getAssociatedObject(request, &GGGaInternalRequestKey)) return;
+    if (usesBlock) atomic_fetch_add(&GGGaBlockSendHits, 1);
+    else atomic_fetch_add(&GGGaListenerSendHits, 1);
+    if (![request isKindOfClass:NSClassFromString(@"AIMPubMsgSendMessage")]) {
+        atomic_fetch_add(&GGGaSendWrongType, 1);
+        return;
+    }
     id content = GGGaGet(request, @selector(content));
     NSString *appCid = GGGaGet(request, @selector(appCid));
-    if (![appCid isKindOfClass:NSString.class] ||
-        ![GGGaGet(request, @selector(receivers)) isKindOfClass:NSArray.class]) return;
+    if (![appCid isKindOfClass:NSString.class] || appCid.length == 0) {
+        atomic_fetch_add(&GGGaSendMissingSession, 1);
+        return;
+    }
+    NSArray *receivers = GGGaGet(request, @selector(receivers));
+    if (![receivers isKindOfClass:NSArray.class] || receivers.count == 0) {
+        atomic_fetch_add(&GGGaSendMissingReceivers, 1);
+        return;
+    }
     BOOL text = GGGaGet(content, @selector(textContent)) != nil;
     BOOL image = GGGaGet(content, @selector(imageContent)) != nil;
+    if (!text && !image) {
+        atomic_fetch_add(&GGGaSendOtherContent, 1);
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (text) { GGGaTextTemplate = request; GGGaTextService = service; GGGaTextUsesBlock = usesBlock; }
         if (image) { GGGaImageTemplate = request; GGGaImageService = service; GGGaImageUsesBlock = usesBlock; }
@@ -111,10 +137,19 @@ static void GGGaObservedBlockSend(id self, SEL command, id message, id progress,
 }
 
 static void GGGaObservedOnMessage(id self, SEL command, id message) {
-    if ([message isKindOfClass:NSClassFromString(@"PMessage")] &&
-        GGGaGetNumber(message, @selector(isMine)) == 0) {
+    atomic_fetch_add(&GGGaIncomingHits, 1);
+    if (![message isKindOfClass:NSClassFromString(@"PMessage")] || ![message respondsToSelector:@selector(isMine)]) {
+        atomic_fetch_add(&GGGaIncomingOtherType, 1);
+    } else if (((BOOL (*)(id, SEL))objc_msgSend)(message, @selector(isMine))) {
+        atomic_fetch_add(&GGGaIncomingOwn, 1);
+    } else {
         id text = GGGaGet(GGGaGet(message, @selector(content)), @selector(text));
-        if ([text isKindOfClass:NSString.class]) dispatch_async(dispatch_get_main_queue(), ^{ GGGaLastIncomingText = [text copy]; });
+        if ([text isKindOfClass:NSString.class] && [text length] > 0) {
+            atomic_fetch_add(&GGGaIncomingTextHits, 1);
+            dispatch_async(dispatch_get_main_queue(), ^{ GGGaLastIncomingText = [text copy]; });
+        } else {
+            atomic_fetch_add(&GGGaIncomingNoText, 1);
+        }
     }
     GGGaOriginalOnMessage(self, command, message);
 }
@@ -187,7 +222,7 @@ static void GGGaInstallSendObserver(void) {
         self.panel.hidden = YES;
         [self addSubview:self.panel];
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
-        title.text = @"消息功能测试 0.3";
+        title.text = @"消息功能测试 0.3.1";
         title.font = [UIFont boldSystemFontOfSize:18];
         [self.panel addSubview:title];
         self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
@@ -195,8 +230,8 @@ static void GGGaInstallSendObserver(void) {
         self.statusLabel.font = [UIFont systemFontOfSize:12];
         self.statusLabel.textColor = UIColor.darkGrayColor;
         [self.panel addSubview:self.statusLabel];
-        NSArray<NSString *> *titles = @[@"刷新状态", @"直接发文字", @"复用图片直发", @"上一条对方消息", @"清除校准", @"关闭"];
-        NSArray<NSString *> *actions = @[@"updateStatus", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        NSArray<NSString *> *titles = @[@"路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
         for (NSUInteger i = 0; i < titles.count; i++) {
             UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
             button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
@@ -281,6 +316,19 @@ static void GGGaInstallSendObserver(void) {
     GGGaLastIncomingText = nil;
     [self updateStatus];
 }
+- (void)showPathDiagnostics {
+    [self updateStatus];
+    NSString *message = [NSString stringWithFormat:
+        @"发送监听安装：普通 %@ / Block %@\n发送入口命中：普通 %d / Block %d\n通过筛选 %d；参数类型不符 %d；无会话 %d；无接收人 %d；其他内容 %d\n\n接收监听安装：%@\n接收入口命中 %d；对象类型不符 %d；己方 %d；无文字 %d；对方文字 %d",
+        GGGaSendHookInstalled ? @"是" : @"否", GGGaBlockSendHookInstalled ? @"是" : @"否",
+        atomic_load(&GGGaListenerSendHits), atomic_load(&GGGaBlockSendHits), atomic_load(&GGGaNativeSendCount),
+        atomic_load(&GGGaSendWrongType), atomic_load(&GGGaSendMissingSession),
+        atomic_load(&GGGaSendMissingReceivers), atomic_load(&GGGaSendOtherContent),
+        GGGaIncomingHookInstalled ? @"是" : @"否", atomic_load(&GGGaIncomingHits),
+        atomic_load(&GGGaIncomingOtherType), atomic_load(&GGGaIncomingOwn),
+        atomic_load(&GGGaIncomingNoText), atomic_load(&GGGaIncomingTextHits)];
+    [self showNotice:message];
+}
 - (void)sendTextTest { [self sendTestImage:NO]; }
 - (void)sendImageTest { [self sendTestImage:YES]; }
 - (void)sendTestImage:(BOOL)image {
@@ -302,13 +350,10 @@ static void GGGaInstallSendObserver(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"直接发送" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         @try {
-            GGGaInternalSend = YES;
             if (usesBlock) GGGaOriginalBlockSend(service, @selector(sendMessageWithBlock:onProgress:onSuccess:onFailure:userData:), request, nil, nil, nil, nil);
             else GGGaOriginalSend(service, @selector(sendMessage:listener:userData:), request, nil, nil);
-            GGGaInternalSend = NO;
             [self showNotice:@"已调用消息 SDK。请检查聊天中是否出现消息及对方是否收到；此提示不代表服务端发送成功。"];
         } @catch (NSException *exception) {
-            GGGaInternalSend = NO;
             [self showNotice:[NSString stringWithFormat:@"SDK 调用异常：%@", exception.name]];
         }
     }]];
@@ -386,7 +431,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.0 message test loaded");
+            NSLog(@"[GGGaTools] 0.3.1 message test loaded");
         });
     }
 }
