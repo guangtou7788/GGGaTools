@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "items": [
+    {
+      "id": "home",
+      "title": "打开首页",
+      "type": "web",
+      "url": "https://aixiya.cn/"
+    },
+    {
+      "id": "store-search",
+      "title": "查询门店",
+      "type": "api",
+      "url": "https://aixiya.cn/api/mendian/",
+      "method": "GET",
+      "input": {
+        "parameter": "q",
+        "placeholder": "输入门店关键词"
+      },
+      "response": "text"
+    }
+  ]
+}
