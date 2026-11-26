@@ -322,7 +322,7 @@ static void GGGaInstallSendObserver(void) {
 @property(nonatomic, strong) UILabel *webStatus;
 @property(nonatomic, strong) UITextField *searchField;
 @property(nonatomic, strong) UITextView *resultView;
-@property(nonatomic, strong) UIButton *copyButton;
+@property(nonatomic, strong) UIButton *resultCopyButton;
 @property(nonatomic, strong) NSURLSessionDataTask *request;
 @property(nonatomic, assign) NSUInteger queryNumber;
 @property(nonatomic, copy) void (^onClose)(void);
@@ -374,8 +374,8 @@ static void GGGaInstallSendObserver(void) {
     ]];
 
     if (storeSearch) {
-        self.copyButton = utility;
-        self.copyButton.enabled = NO;
+        self.resultCopyButton = utility;
+        self.resultCopyButton.enabled = NO;
         self.searchField = [UITextField new];
         self.searchField.placeholder = @"输入门店关键词";
         self.searchField.borderStyle = UITextBorderStyleRoundedRect;
@@ -430,9 +430,9 @@ static void GGGaInstallSendObserver(void) {
 }
 
 - (void)copyResult {
-    if (!self.copyButton.enabled) return;
+    if (!self.resultCopyButton.enabled) return;
     UIPasteboard.generalPasteboard.string = self.resultView.text;
-    [self.copyButton setTitle:@"已复制" forState:UIControlStateNormal];
+    [self.resultCopyButton setTitle:@"已复制" forState:UIControlStateNormal];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -446,8 +446,8 @@ static void GGGaInstallSendObserver(void) {
     [self.searchField resignFirstResponder];
     [self.request cancel];
     NSUInteger query = ++self.queryNumber;
-    self.copyButton.enabled = NO;
-    [self.copyButton setTitle:@"复制" forState:UIControlStateNormal];
+    self.resultCopyButton.enabled = NO;
+    [self.resultCopyButton setTitle:@"复制" forState:UIControlStateNormal];
     self.resultView.text = @"正在查询…";
 
     NSURLComponents *components = [NSURLComponents componentsWithString:@"https://aixiya.cn/api/mendian/"];
@@ -477,7 +477,7 @@ static void GGGaInstallSendObserver(void) {
                 page.resultView.text = data.length ? @"返回内容无法按 UTF-8 读取。" : @"接口未返回内容。";
             } else {
                 page.resultView.text = result;
-                page.copyButton.enabled = YES;
+                page.resultCopyButton.enabled = YES;
             }
             [page.resultView setContentOffset:CGPointZero animated:NO];
         });
