@@ -15,11 +15,16 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
       - name: Build iOS dynamic library
+        id: build
         run: bash build.sh
       - name: Upload library
         uses: actions/upload-artifact@v4
         with:
-          name: GGGaTools-iOS-arm64
-          path: build/
+          name: GGGaTools-${{ steps.build.outputs.version }}-iOS-arm64
+          path: |
+            ${{ steps.build.outputs.library }}
+            build/INSTALL.txt
+            build/SHA256SUMS.txt
+            build/build-info.txt
           if-no-files-found: error
           retention-days: 14

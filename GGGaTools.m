@@ -189,6 +189,28 @@ static void GGGaInstallSendObserver(void) {
 - (void)sendTestImage:(BOOL)image;
 @end
 
+static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibleArea,
+                                   Class webViewClass, Class flutterViewClass,
+                                   NSMutableArray<NSString *> *webViews,
+                                   NSMutableArray<NSString *> *flutterViews) {
+    if (view.hidden || view.alpha <= 0.01 || (view != window && view.window != window)) return;
+    CGRect bounds = [view convertRect:view.bounds toView:window];
+    CGRect visibleBounds = CGRectIntersection(bounds, visibleArea);
+    if (!CGRectIsEmpty(visibleBounds)) {
+        NSMutableArray<NSString *> *matches = nil;
+        if (webViewClass && [view isKindOfClass:webViewClass]) matches = webViews;
+        if (flutterViewClass && [view isKindOfClass:flutterViewClass]) matches = flutterViews;
+        if (matches) {
+            [matches addObject:[NSString stringWithFormat:@"%@  %@", NSStringFromClass(view.class), NSStringFromCGRect(visibleBounds)]];
+        }
+    }
+    CGRect childArea = view.clipsToBounds ? visibleBounds : visibleArea;
+    if (CGRectIsEmpty(childArea)) return;
+    for (UIView *child in view.subviews) {
+        GGGaCollectRenderViews(child, window, childArea, webViewClass, flutterViewClass, webViews, flutterViews);
+    }
+}
+
 @implementation GGGaTestOverlay
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -213,7 +235,7 @@ static void GGGaInstallSendObserver(void) {
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
         [self addSubview:self.bubble];
-        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 288)];
+        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 328)];
         self.panel.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.98];
         self.panel.layer.cornerRadius = 14;
         self.panel.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -222,7 +244,7 @@ static void GGGaInstallSendObserver(void) {
         self.panel.hidden = YES;
         [self addSubview:self.panel];
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
-        title.text = @"消息功能测试 0.3.1";
+        title.text = @"消息功能测试 0.3.2";
         title.font = [UIFont boldSystemFontOfSize:18];
         [self.panel addSubview:title];
         self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
@@ -230,8 +252,8 @@ static void GGGaInstallSendObserver(void) {
         self.statusLabel.font = [UIFont systemFontOfSize:12];
         self.statusLabel.textColor = UIColor.darkGrayColor;
         [self.panel addSubview:self.statusLabel];
-        NSArray<NSString *> *titles = @[@"路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
-        NSArray<NSString *> *actions = @[@"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        NSArray<NSString *> *titles = @[@"检查网页容器", @"路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
         for (NSUInteger i = 0; i < titles.count; i++) {
             UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
             button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
@@ -327,6 +349,19 @@ static void GGGaInstallSendObserver(void) {
         GGGaIncomingHookInstalled ? @"是" : @"否", atomic_load(&GGGaIncomingHits),
         atomic_load(&GGGaIncomingOtherType), atomic_load(&GGGaIncomingOwn),
         atomic_load(&GGGaIncomingNoText), atomic_load(&GGGaIncomingTextHits)];
+    [self showNotice:message];
+}
+- (void)showRenderDiagnostics {
+    UIWindow *window = self.window;
+    if (!window) return;
+    NSMutableArray<NSString *> *webViews = [NSMutableArray array];
+    NSMutableArray<NSString *> *flutterViews = [NSMutableArray array];
+    GGGaCollectRenderViews(window, window, window.bounds, NSClassFromString(@"WKWebView"),
+                          NSClassFromString(@"FlutterView"), webViews, flutterViews);
+    NSString *message = [NSString stringWithFormat:
+        @"当前窗口内的可见布局区域\n\nWKWebView：%lu\n%@\n\nFlutterView：%lu\n%@",
+        (unsigned long)webViews.count, [webViews componentsJoinedByString:@"\n"],
+        (unsigned long)flutterViews.count, [flutterViews componentsJoinedByString:@"\n"]];
     [self showNotice:message];
 }
 - (void)sendTextTest { [self sendTestImage:NO]; }
@@ -431,7 +466,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.1 message test loaded");
+            NSLog(@"[GGGaTools] 0.3.2 message test loaded");
         });
     }
 }

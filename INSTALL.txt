@@ -1,10 +1,12 @@
-GGGaTools 0.3.1 — 消息路径诊断
+GGGaTools 0.3.2 — 消息路径诊断
 
-从 GitHub Actions 下载 GGGaTools-iOS-arm64，解压取得 GGGaTools.dylib。用 ESign 注入 IPA 测试副本并重签安装。
+从 GitHub Actions 下载 GGGaTools-0.3.2-iOS-arm64，解压取得 GGGaTools-0.3.2.dylib。用 ESign 注入 IPA 测试副本并重签安装。测试副本只保留一个版本的 GGGaTools。
 
 固定文字：【GGGaTools测试】这是一条插件直接发送的测试消息
 
 测试顺序：
+先在首页、聊天列表和聊天详情分别点「检查网页容器」，记录 WKWebView 和 FlutterView 的数量及位置和尺寸。这项检测无需发送消息。
+
 1. 在自己的测试会话手动发送一条普通文字和一张可重复发送的测试图片，用于捕获当前会话参数。
 2. 点黄色“测试”悬窗 → 路径诊断，查看发送入口的命中次数和筛选原因。
 3. 点“直接发文字”，核对二次确认内容后尝试发送；查看聊天页和对方设备。
