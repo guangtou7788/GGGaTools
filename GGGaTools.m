@@ -317,47 +317,181 @@ static void GGGaInstallSendObserver(void) {
     }
 }
 
-@interface GGGaWebPageController : UIViewController <WKNavigationDelegate>
+@interface GGGaFloatingPage : UIView <WKNavigationDelegate, UITextFieldDelegate>
 @property(nonatomic, strong) WKWebView *webView;
+@property(nonatomic, strong) UILabel *webStatus;
+@property(nonatomic, strong) UITextField *searchField;
+@property(nonatomic, strong) UITextView *resultView;
+@property(nonatomic, strong) UIButton *copyButton;
+@property(nonatomic, strong) NSURLSessionDataTask *request;
+@property(nonatomic, assign) NSUInteger queryNumber;
 @property(nonatomic, copy) void (^onClose)(void);
+@property(nonatomic, copy) void (^onMenu)(void);
+- (instancetype)initWithStoreSearch:(BOOL)storeSearch;
 @end
 
-@implementation GGGaWebPageController
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"aixiya.cn";
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
-        initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(closePage)];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
-        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(loadPage)];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+@implementation GGGaFloatingPage
+- (UIButton *)buttonWithTitle:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [button.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    return button;
+}
 
-    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
-    configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
-    self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
-    self.webView.navigationDelegate = self;
-    self.webView.allowsBackForwardNavigationGestures = YES;
-    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.webView];
-    UILayoutGuide *safeArea = self.view.safeAreaLayoutGuide;
+- (instancetype)initWithStoreSearch:(BOOL)storeSearch {
+    self = [super initWithFrame:CGRectZero];
+    if (!self) return nil;
+
+    self.backgroundColor = UIColor.systemBackgroundColor;
+    self.layer.cornerRadius = 16;
+    self.layer.borderColor = UIColor.separatorColor.CGColor;
+    self.layer.borderWidth = 1;
+    self.clipsToBounds = YES;
+
+    UILabel *title = [UILabel new];
+    title.text = storeSearch ? @"查门店" : @"aixiya.cn";
+    title.font = [UIFont boldSystemFontOfSize:16];
+    UIButton *menu = [self buttonWithTitle:@"菜单" action:@selector(openMenu)];
+    UIButton *close = [self buttonWithTitle:@"关闭" action:@selector(closePage)];
+    UIButton *utility = [self buttonWithTitle:storeSearch ? @"复制" : @"刷新"
+                                      action:storeSearch ? @selector(copyResult) : @selector(loadWebsite)];
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[title, menu, utility, close]];
+    header.spacing = 4;
+    [header.heightAnchor constraintEqualToConstant:44].active = YES;
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[header]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 4;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
-        [self.webView.topAnchor constraintEqualToAnchor:safeArea.topAnchor],
-        [self.webView.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor],
-        [self.webView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor],
-        [self.webView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor]
+        [stack.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
+        [stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-8],
+        [stack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10],
+        [stack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10]
     ]];
-    [self loadPage];
+
+    if (storeSearch) {
+        self.copyButton = utility;
+        self.copyButton.enabled = NO;
+        self.searchField = [UITextField new];
+        self.searchField.placeholder = @"输入门店关键词";
+        self.searchField.borderStyle = UITextBorderStyleRoundedRect;
+        self.searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        self.searchField.returnKeyType = UIReturnKeySearch;
+        self.searchField.delegate = self;
+        UIButton *search = [self buttonWithTitle:@"查询" action:@selector(searchStores)];
+        UIStackView *searchRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.searchField, search]];
+        searchRow.spacing = 8;
+        [searchRow.heightAnchor constraintEqualToConstant:44].active = YES;
+        [stack addArrangedSubview:searchRow];
+
+        self.resultView = [UITextView new];
+        self.resultView.editable = NO;
+        self.resultView.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        self.resultView.text = @"输入关键词后，点「查询」。";
+        [stack addArrangedSubview:self.resultView];
+    } else {
+        self.webStatus = [UILabel new];
+        self.webStatus.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        self.webStatus.numberOfLines = 0;
+        self.webStatus.hidden = YES;
+        [stack addArrangedSubview:self.webStatus];
+
+        WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+        configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+        self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
+        self.webView.navigationDelegate = self;
+        self.webView.allowsBackForwardNavigationGestures = YES;
+        [stack addArrangedSubview:self.webView];
+        [self loadWebsite];
+    }
+
+    return self;
 }
-- (void)loadPage {
-    NSURL *url = self.webView.URL ?: [NSURL URLWithString:@"https://aixiya.cn/"];
-    [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
+
+- (void)loadWebsite {
+    self.webStatus.hidden = YES;
+    if (self.webView.URL) {
+        [self.webView reload];
+    } else {
+        [self.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://aixiya.cn/"]]];
+    }
 }
+
 - (void)closePage {
-    [self dismissViewControllerAnimated:YES completion:self.onClose];
+    if (self.onClose) self.onClose();
 }
+
+- (void)openMenu {
+    if (self.onMenu) self.onMenu();
+}
+
+- (void)copyResult {
+    if (!self.copyButton.enabled) return;
+    UIPasteboard.generalPasteboard.string = self.resultView.text;
+    [self.copyButton setTitle:@"已复制" forState:UIControlStateNormal];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [self searchStores];
+    return NO;
+}
+
+- (void)searchStores {
+    NSString *keyword = [self.searchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!keyword.length) return;
+    [self.searchField resignFirstResponder];
+    [self.request cancel];
+    NSUInteger query = ++self.queryNumber;
+    self.copyButton.enabled = NO;
+    [self.copyButton setTitle:@"复制" forState:UIControlStateNormal];
+    self.resultView.text = @"正在查询…";
+
+    NSURLComponents *components = [NSURLComponents componentsWithString:@"https://aixiya.cn/api/mendian/"];
+    components.queryItems = @[[NSURLQueryItem queryItemWithName:@"q" value:keyword]];
+    components.percentEncodedQuery = [components.percentEncodedQuery stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
+    NSURL *url = components.URL;
+    if (!url) {
+        self.resultView.text = @"关键词无法编码。";
+        return;
+    }
+
+    NSURLRequest *request = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:20];
+    __weak GGGaFloatingPage *weakSelf = self;
+    self.request = [NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:
+        ^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+        NSString *result = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GGGaFloatingPage *page = weakSelf;
+            if (!page || query != page.queryNumber) return;
+            page.request = nil;
+            if (error) {
+                page.resultView.text = [NSString stringWithFormat:@"查询失败：%@", error.localizedDescription];
+            } else if (status < 200 || status >= 300) {
+                page.resultView.text = [NSString stringWithFormat:@"查询失败（HTTP %ld）。", (long)status];
+            } else if (!result.length) {
+                page.resultView.text = data.length ? @"返回内容无法按 UTF-8 读取。" : @"接口未返回内容。";
+            } else {
+                page.resultView.text = result;
+                page.copyButton.enabled = YES;
+            }
+            [page.resultView setContentOffset:CGPointZero animated:NO];
+        });
+    }];
+    [self.request resume];
+}
+
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
  decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     NSURL *url = action.request.URL;
+    if (action.targetFrame && !action.targetFrame.isMainFrame) {
+        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
+    }
     if (![url.scheme.lowercaseString isEqualToString:@"https"]) {
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
@@ -369,17 +503,22 @@ static void GGGaInstallSendObserver(void) {
     }
     decisionHandler(WKNavigationActionPolicyAllow);
 }
+
 - (void)showLoadError:(NSError *)error {
-    if (error.code == NSURLErrorCancelled || !self.view.window || self.presentedViewController) return;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"网页加载失败"
-        message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    if (error.code == NSURLErrorCancelled) return;
+    self.webStatus.text = [NSString stringWithFormat:@"网页加载失败：%@", error.localizedDescription];
+    self.webStatus.hidden = NO;
 }
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    self.webStatus.hidden = YES;
+}
+
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     [self showLoadError:error];
 }
+
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation
       withError:(NSError *)error {
     [self showLoadError:error];
@@ -390,9 +529,16 @@ static void GGGaInstallSendObserver(void) {
 @property(nonatomic, strong) UIButton *bubble;
 @property(nonatomic, strong) UIView *panel;
 @property(nonatomic, strong) UILabel *statusLabel;
+@property(nonatomic, strong) UIButton *pageBackdrop;
+@property(nonatomic, strong) GGGaFloatingPage *websitePage;
+@property(nonatomic, strong) GGGaFloatingPage *storePage;
+@property(nonatomic, weak) GGGaFloatingPage *activePage;
+@property(nonatomic, weak) GGGaFloatingPage *lastPage;
 @property(nonatomic, assign) BOOL positioned;
 - (void)updateStatus;
 - (void)sendTestImage:(BOOL)image;
+- (void)showFloatingPage:(GGGaFloatingPage *)page;
+- (void)updateBubbleLabel;
 @end
 
 static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibleArea,
@@ -437,7 +583,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.bubble.layer.shadowRadius = 5;
         self.bubble.layer.shadowOffset = CGSizeMake(0, 2);
         self.bubble.accessibilityLabel = @"打开消息功能测试面板";
-        [self.bubble addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+        [self.bubble addTarget:self action:@selector(tapBubble) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
@@ -451,7 +597,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.panel.hidden = YES;
         [self addSubview:self.panel];
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
-        title.text = @"消息功能测试 0.3.4";
+        title.text = @"消息功能测试 0.3.5";
         title.font = [UIFont boldSystemFontOfSize:18];
         [self.panel addSubview:title];
         self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
@@ -459,8 +605,8 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.statusLabel.font = [UIFont systemFontOfSize:12];
         self.statusLabel.textColor = UIColor.darkGrayColor;
         [self.panel addSubview:self.statusLabel];
-        NSArray<NSString *> *titles = @[@"打开网页", @"多路径结果", @"记录测试起点", @"桥接方法明细", @"检查网页容器", @"旧路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
-        NSArray<NSString *> *actions = @[@"openWebsite", @"showParallelDiagnostics", @"recordProbeBaseline", @"showBridgeDetails", @"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        NSArray<NSString *> *titles = @[@"打开网页", @"查门店", @"多路径结果", @"记录测试起点", @"桥接方法明细", @"检查网页容器", @"旧路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"openWebsite", @"openStoreSearch", @"showParallelDiagnostics", @"recordProbeBaseline", @"showBridgeDetails", @"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
         for (NSUInteger i = 0; i < titles.count; i++) {
             UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
             button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
@@ -471,6 +617,13 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
             [button addTarget:self action:NSSelectorFromString(actions[i]) forControlEvents:UIControlEventTouchUpInside];
             [self.panel addSubview:button];
         }
+        self.pageBackdrop = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.pageBackdrop.frame = self.bounds;
+        self.pageBackdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.pageBackdrop.hidden = YES;
+        self.pageBackdrop.accessibilityLabel = @"收起悬浮页面";
+        [self.pageBackdrop addTarget:self action:@selector(minimizePage) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:self.pageBackdrop];
     }
     return self;
 }
@@ -490,8 +643,15 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
     CGFloat x = MIN(MAX(8, self.bubble.center.x - self.panel.bounds.size.width), MAX(8, self.bounds.size.width - self.panel.bounds.size.width - 8));
     CGFloat y = MIN(MAX(self.safeAreaInsets.top + 8, self.bubble.center.y - 115), MAX(self.safeAreaInsets.top + 8, self.bounds.size.height - self.safeAreaInsets.bottom - self.panel.bounds.size.height - 8));
     self.panel.frame = CGRectMake(x, y, self.panel.bounds.size.width, self.panel.bounds.size.height);
+    CGRect safeArea = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+    CGFloat width = MAX(0, MIN(CGRectGetWidth(safeArea) - 24, 560));
+    CGFloat height = MAX(0, MIN(CGRectGetHeight(safeArea) - 36, CGRectGetHeight(safeArea) * 0.77));
+    CGRect pageFrame = CGRectMake(CGRectGetMidX(safeArea) - width / 2,
+        CGRectGetMinY(safeArea) + 18, width, height);
+    self.websitePage.frame = pageFrame;
+    self.storePage.frame = pageFrame;
 }
-// Only the button receives touches. Chat fields and scrolling remain reachable.
+// The host receives touches outside the menu when no floating page is open.
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return hit == self ? nil : hit;
@@ -531,18 +691,56 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
     self.panel.hidden = !self.panel.hidden;
     if (!self.panel.hidden) [self updateStatus];
 }
-- (void)openWebsite {
-    UIViewController *presenter = [self presentingController];
-    if (!presenter || presenter.isBeingPresented || presenter.isBeingDismissed) return;
-    GGGaWebPageController *page = [GGGaWebPageController new];
+- (void)tapBubble {
+    if (!self.panel.hidden || !self.lastPage) {
+        [self togglePanel];
+    } else {
+        [self showFloatingPage:self.lastPage];
+    }
+}
+- (void)updateBubbleLabel {
+    NSString *title = self.lastPage ? (self.lastPage == self.storePage ? @"门店" : @"网页") : @"测试";
+    [self.bubble setTitle:title forState:UIControlStateNormal];
+    self.bubble.accessibilityLabel = self.lastPage ?
+        [NSString stringWithFormat:@"恢复悬浮%@", title] : @"打开消息功能测试面板";
+}
+- (void)minimizePage {
+    [self.activePage endEditing:YES];
+    self.activePage.hidden = YES;
+    self.activePage = nil;
+    self.pageBackdrop.hidden = YES;
+    [self updateBubbleLabel];
+}
+- (GGGaFloatingPage *)newFloatingPageForStoreSearch:(BOOL)storeSearch {
+    GGGaFloatingPage *page = [[GGGaFloatingPage alloc] initWithStoreSearch:storeSearch];
     __weak GGGaTestOverlay *overlay = self;
-    page.onClose = ^{ overlay.bubble.hidden = NO; };
-    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:page];
-    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    page.onClose = ^{ [overlay minimizePage]; };
+    page.onMenu = ^{
+        [overlay minimizePage];
+        [overlay togglePanel];
+    };
+    page.hidden = YES;
+    [self addSubview:page];
+    return page;
+}
+- (void)showFloatingPage:(GGGaFloatingPage *)page {
+    if (self.activePage != page) [self minimizePage];
     self.panel.hidden = YES;
-    [presenter presentViewController:navigation animated:YES completion:^{
-        overlay.bubble.hidden = YES;
-    }];
+    self.lastPage = page;
+    self.activePage = page;
+    self.pageBackdrop.hidden = NO;
+    page.hidden = NO;
+    [self bringSubviewToFront:page];
+    [self updateBubbleLabel];
+    [self setNeedsLayout];
+}
+- (void)openWebsite {
+    if (!self.websitePage) self.websitePage = [self newFloatingPageForStoreSearch:NO];
+    [self showFloatingPage:self.websitePage];
+}
+- (void)openStoreSearch {
+    if (!self.storePage) self.storePage = [self newFloatingPageForStoreSearch:YES];
+    [self showFloatingPage:self.storePage];
 }
 - (void)updateStatus {
     NSString *session = GGGaLatestAppCid.length > 8 ? [GGGaLatestAppCid substringFromIndex:GGGaLatestAppCid.length - 8] : (GGGaLatestAppCid ?: @"无");
@@ -722,7 +920,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.4 message test loaded");
+            NSLog(@"[GGGaTools] 0.3.5 message test loaded");
         });
     }
 }

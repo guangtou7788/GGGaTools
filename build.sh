@@ -6,7 +6,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
-VERSION=0.3.4
+VERSION=0.3.5
 LIBRARY="GGGaTools-${VERSION}.dylib"
 OUTPUT="build/$LIBRARY"
 mkdir -p build
