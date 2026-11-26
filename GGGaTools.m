@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <QuartzCore/QuartzCore.h>
+#include <math.h>
 
 static NSString *const GGGaMenuURL = @"https://aixiya.cn/api/gggatools/menu.json";
 static const NSInteger GGGaDefaultWebZoom = 75;
@@ -65,6 +66,7 @@ static NSURLSession *GGGaHTTPSession(void) {
 @interface GGGaFloatingPage : UIView <WKNavigationDelegate, UITextFieldDelegate>
 @property(nonatomic, copy) NSDictionary *item;
 @property(nonatomic, strong) WKWebView *webView;
+@property(nonatomic, assign) NSInteger appliedViewportWidth;
 @property(nonatomic, strong) UILabel *webStatus;
 @property(nonatomic, strong) UITextField *searchField;
 @property(nonatomic, strong) UITextView *resultView;
@@ -150,21 +152,7 @@ static NSURLSession *GGGaHTTPSession(void) {
 
         WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
         configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
-        NSInteger zoom = GGGaWebZoom(item);
-        if (@available(iOS 14.0, *)) {
-            // Use WebKit page zoom when available.
-        } else {
-            NSString *source = [NSString stringWithFormat:
-                @"document.documentElement.style.zoom = %ld/100;", (long)zoom];
-            WKUserScript *zoomScript = [[WKUserScript alloc]
-                initWithSource:source
-                injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
-            [configuration.userContentController addUserScript:zoomScript];
-        }
         self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
-        if (@available(iOS 14.0, *)) {
-            self.webView.pageZoom = zoom / 100.0;
-        }
         self.webView.navigationDelegate = self;
         self.webView.allowsBackForwardNavigationGestures = YES;
         [stack addArrangedSubview:self.webView];
@@ -172,6 +160,34 @@ static NSURLSession *GGGaHTTPSession(void) {
     }
 
     return self;
+}
+
+- (void)applyWebsiteViewport {
+    CGFloat visibleWidth = CGRectGetWidth(self.webView.bounds);
+    if (!self.webView.URL || visibleWidth <= 0) return;
+    NSInteger zoom = GGGaWebZoom(self.item);
+    // A wider layout viewport keeps the fixed-size native window filled at the selected scale.
+    NSInteger viewportWidth = MAX(200, (NSInteger)ceil(visibleWidth * 100.0 / zoom));
+    if (self.appliedViewportWidth == viewportWidth) return;
+    self.appliedViewportWidth = viewportWidth;
+    NSString *script = [NSString stringWithFormat:
+        @"(function(){"
+        @"var viewport=document.querySelector('meta[name=viewport]');"
+        @"if(!viewport){viewport=document.createElement('meta');viewport.name='viewport';document.head.appendChild(viewport);}"
+        @"var scale=%ld/100;"
+        @"viewport.content='width=%ld, initial-scale='+scale;"
+        @"document.documentElement.style.webkitTextSizeAdjust='100%%';"
+        @"})()", (long)zoom, (long)viewportWidth];
+    __weak GGGaFloatingPage *weakSelf = self;
+    [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        GGGaFloatingPage *page = weakSelf;
+        if (error && page.appliedViewportWidth == viewportWidth) page.appliedViewportWidth = 0;
+    }];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!self.webView.loading) [self applyWebsiteViewport];
 }
 
 - (void)loadWebsite {
@@ -280,6 +296,8 @@ static NSURLSession *GGGaHTTPSession(void) {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.webStatus.hidden = YES;
+    self.appliedViewportWidth = 0;
+    [self applyWebsiteViewport];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
@@ -329,6 +347,7 @@ static NSURLSession *GGGaHTTPSession(void) {
         self.bubble = [UIButton buttonWithType:UIButtonTypeCustom];
         self.bubble.frame = CGRectMake(0, 0, 88, 44);
         self.bubble.backgroundColor = [UIColor colorWithRed:0.85 green:0.16 blue:0.22 alpha:1];
+        self.bubble.alpha = 0.60;
         [self.bubble setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         self.bubble.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
         self.bubble.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 0);
@@ -742,7 +761,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaOverlayManager *manager;
             if (!manager) manager = [[GGGaOverlayManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.7 floating tools loaded");
+            NSLog(@"[GGGaTools] 0.3.8 floating tools loaded");
         });
     }
 }
