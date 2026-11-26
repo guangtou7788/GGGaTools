@@ -1,37 +1,27 @@
-# GGGaTools
+# GGGaTools 0.3.0 — 消息直发测试
 
-iOS App 内悬浮按钮注入测试，版本 0.1.0。
+本版将“测试”悬窗作为诊断面板。两个发送按钮尝试直接调用 App 内的 `AIMPubMsgService`，不通过聊天输入框。
 
-黄色「嘎」按钮支持拖动，点击显示测试信息。用于先确认 dylib 加载和 UIKit 悬浮交互，再接入门店查询。
+## 面板功能
 
-## 快速开始
+1. **刷新状态**：显示 SDK 监听、已观察的发送次数、最近校准会话尾号，以及文字和图片参数是否已捕获。
+2. **直接发文字**：先在目标测试会话手动发送一条普通文字以捕获发送参数。之后点击此按钮，经二次确认后尝试直接发送固定文字 `【GGGaTools测试】这是一条插件直接发送的测试消息`。不需要打开键盘。
+3. **复用图片直发**：先在同一测试会话手动发送一张测试图片。只有捕获的图片参数包含已上传媒体标识且会话一致时，才允许确认后尝试再次发送同一张图片。本版不从相册选择或上传新图片。
+4. **上一条对方消息**：尝试观察 `AIMManager onMessage:` 中的 `PMessage`，仅在 `isMine == NO` 且有文字时显示最近捕获内容。该路径尚未证实用于当前 Flutter 聊天，也不能可靠对应到当前 AIM 会话；结果可能为空或来自其他会话，不能用于自动回复。
+5. **清除校准**：清空进程内保存的发送样本和最近文字。切换测试会话前应先清除，再重新校准。校准超过 10 分钟后也会禁止直发。
 
-1. 将本目录内容上传至 GitHub 仓库根目录，包含 `.github/workflows/build.yml`。
-2. 打开 **Actions → Build GGGaTools**，等待成功后下载 **GGGaTools-iOS-arm64**。
-3. 解压取得 `GGGaTools.dylib`，通过轻松签注入目标 IPA，重签名安装。
-4. 打开 App 等待约 2 秒，测试按钮显示、拖动、点击、页面切换和聊天输入。
+两种直发都只在你点击确认后调用 SDK。提示“已调用”不代表服务端成功；需核对聊天页和对方设备。不会自动回复或循环发送。
 
-完整操作和排查见 [INSTALL.txt](INSTALL.txt)。无法上传隐藏目录时，可按说明复制 [GitHub-workflow-copy.txt](GitHub-workflow-copy.txt) 创建工作流。
+## 已知限制
 
-## 构建
+- 目前只观察 `AIMPubMsgService` 的两个 Objective-C 发送方法。若实际聊天走另一条 FFI 路径，状态会停在“待捕获”，直发按钮不会猜测参数。
+- SDK 调用以空监听器和回调执行，不能准确显示服务端发送回执。
+- 图片仅复用已发送图片的媒体参数；未实现新图片上传。
+- 发送样本仅保存在本次 App 进程内存中。插件日志不写消息正文、接收人或会话 ID。
+- 针对闲鱼 7.29.20 的实验代码，真机效果和稳定性尚未验证。
 
-```bash
-bash build.sh
-```
+## 拟定验收顺序
 
-需要 macOS、Xcode 和 iPhoneOS SDK。使用系统 clang，输出 iOS 13+ / arm64 dylib，不依赖 Theos、Substrate、第三方 SDK 或 GitHub Secrets。产物经临时签名，注入时需要随目标 App 重新签名。
+在自己的测试会话中，先手动发送一条文字和一张可重复发送的测试图片；打开悬窗刷新状态；分别尝试直发文字和图片；让对方发送新文字，再查看“上一条对方消息”。记录面板状态、聊天页结果与对方是否收到。若某项不可用，保留提示截图即可定位失败阶段。
 
-## 实现和范围
-
-- 使用 constructor 在主线程启动，在前台普通 App 窗口添加透明视图；不替换宿主方法。
-- 按钮外的触摸透传；监听 App 和 Scene 激活，并每 2 秒在前台检查按钮。
-- 没有网络请求，不读取剪贴板；用户点“复制测试信息”时写入版本与 App 标识。
-- 仅显示在被注入 App 内；不提供系统全局悬浮窗，不适用于模拟器或 App 扩展。
-- 不保证所有 App 兼容；需要可重签名的 IPA 和有效签名材料。
-
-当前交付为源代码。已做结构与脚本语法检查，未进行 Xcode 编译、轻松签注入或真机验证；以你的 Actions 日志和真机结果为准。
-
-## 参考
-
-- [Apple UIWindowScene](https://developer.apple.com/documentation/uikit/uiwindowscene)
-- [GitHub 构建产物下载说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+从 GitHub Actions 下载 `GGGaTools-iOS-arm64`，解压取得 `GGGaTools.dylib`，再通过 ESign 注入 IPA 测试副本。完整步骤见 [INSTALL.txt](INSTALL.txt)。

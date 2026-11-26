@@ -1,35 +1,212 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+#import <stdatomic.h>
+#include <string.h>
 
-// v0.1.0: visible injection test, using public UIKit APIs only.
+// A diagnostic build: no message contents or recipient identifiers are logged.
+static NSString *const GGGaDirectText = @"【GGGaTools测试】这是一条插件直接发送的测试消息";
+static atomic_int GGGaNativeSendCount;
+static BOOL GGGaSendHookInstalled;
+static BOOL GGGaBlockSendHookInstalled;
+static BOOL GGGaIncomingHookInstalled;
+static BOOL GGGaInternalSend;
+static char GGGaInternalRequestKey;
+static id GGGaTextTemplate;
+static id GGGaImageTemplate;
+static id GGGaTextService;
+static id GGGaImageService;
+static BOOL GGGaTextUsesBlock;
+static BOOL GGGaImageUsesBlock;
+static NSString *GGGaLatestAppCid;
+static NSDate *GGGaLastCalibrationAt;
+static NSString *GGGaLastIncomingText;
+static void (*GGGaOriginalSend)(id, SEL, id, id, id);
+static void (*GGGaOriginalBlockSend)(id, SEL, id, id, id, id, id);
+static void (*GGGaOriginalOnMessage)(id, SEL, id);
+
+static id GGGaGet(id object, SEL selector) {
+    return object && [object respondsToSelector:selector] ? ((id (*)(id, SEL))objc_msgSend)(object, selector) : nil;
+}
+static void GGGaSet(id object, SEL selector, id value) {
+    if (object && [object respondsToSelector:selector]) ((void (*)(id, SEL, id))objc_msgSend)(object, selector, value);
+}
+static long long GGGaGetNumber(id object, SEL selector) {
+    return object && [object respondsToSelector:selector] ? ((long long (*)(id, SEL))objc_msgSend)(object, selector) : -1;
+}
+static void GGGaSetNumber(id object, SEL selector, long long value) {
+    if (object && [object respondsToSelector:selector]) ((void (*)(id, SEL, long long))objc_msgSend)(object, selector, value);
+}
+static void GGGaCaptureSend(id service, id request, BOOL usesBlock) {
+    if (GGGaInternalSend || objc_getAssociatedObject(request, &GGGaInternalRequestKey) ||
+        ![request isKindOfClass:NSClassFromString(@"AIMPubMsgSendMessage")]) return;
+    id content = GGGaGet(request, @selector(content));
+    NSString *appCid = GGGaGet(request, @selector(appCid));
+    if (![appCid isKindOfClass:NSString.class] ||
+        ![GGGaGet(request, @selector(receivers)) isKindOfClass:NSArray.class]) return;
+    BOOL text = GGGaGet(content, @selector(textContent)) != nil;
+    BOOL image = GGGaGet(content, @selector(imageContent)) != nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (text) { GGGaTextTemplate = request; GGGaTextService = service; GGGaTextUsesBlock = usesBlock; }
+        if (image) { GGGaImageTemplate = request; GGGaImageService = service; GGGaImageUsesBlock = usesBlock; }
+        GGGaLatestAppCid = [appCid copy];
+        GGGaLastCalibrationAt = [NSDate date];
+    });
+    atomic_fetch_add(&GGGaNativeSendCount, 1);
+}
+
+static id GGGaMakeRequest(id templateRequest, BOOL image, NSString **reason) {
+    if (!templateRequest) { *reason = image ? @"请先在目标测试会话手动发送一张图片以校准参数。" : @"请先在目标测试会话手动发送一条文字以校准参数。"; return nil; }
+    NSString *appCid = GGGaGet(templateRequest, @selector(appCid));
+    NSArray *receivers = GGGaGet(templateRequest, @selector(receivers));
+    if (!GGGaLastCalibrationAt || [GGGaLastCalibrationAt timeIntervalSinceNow] < -600) {
+        *reason = @"校准已超过 10 分钟，请在目标测试会话重新手动发送一次。"; return nil;
+    }
+    if (![appCid isKindOfClass:NSString.class] || ![appCid isEqualToString:GGGaLatestAppCid] ||
+        ![receivers isKindOfClass:NSArray.class] || receivers.count == 0) {
+        *reason = @"校准会话不一致或缺少接收人，请在当前测试会话重新手动发送一次。"; return nil;
+    }
+    id oldContent = GGGaGet(templateRequest, @selector(content));
+    id content = [NSClassFromString(@"AIMPubMsgContent") new];
+    id request = [NSClassFromString(@"AIMPubMsgSendMessage") new];
+    if (!content || !request) { *reason = @"当前版本未找到消息参数类。"; return nil; }
+    long long contentType = GGGaGetNumber(oldContent, @selector(contentType));
+    if (contentType < 0) { *reason = @"无法确定消息内容类型。"; return nil; }
+    GGGaSetNumber(content, @selector(setContentType:), contentType);
+    if (image) {
+        id photo = GGGaGet(oldContent, @selector(imageContent));
+        id mediaId = GGGaGet(photo, @selector(mediaId));
+        id originalUrl = GGGaGet(photo, @selector(originalUrl));
+        BOOL uploaded = ([mediaId isKindOfClass:NSString.class] && [mediaId length] > 0) ||
+                        ([originalUrl isKindOfClass:NSString.class] && [originalUrl length] > 0);
+        if (!uploaded) {
+            *reason = @"捕获的图片缺少已上传媒体标识，无法直接复用。"; return nil;
+        }
+        GGGaSet(content, @selector(setImageContent:), photo);
+    } else {
+        id textContent = [NSClassFromString(@"AIMPubMsgTextContent") new];
+        if (!textContent || !GGGaGet(oldContent, @selector(textContent))) { *reason = @"文字内容结构不匹配。"; return nil; }
+        GGGaSet(textContent, @selector(setText:), GGGaDirectText);
+        GGGaSet(textContent, @selector(setExtension:), GGGaGet(GGGaGet(oldContent, @selector(textContent)), @selector(extension)));
+        GGGaSet(content, @selector(setTextContent:), textContent);
+    }
+    GGGaSet(request, @selector(setAppCid:), appCid);
+    GGGaSet(request, @selector(setReceivers:), receivers);
+    GGGaSet(request, @selector(setContent:), content);
+    GGGaSet(request, @selector(setExtension:), GGGaGet(templateRequest, @selector(extension)));
+    GGGaSet(request, @selector(setLocalExtension:), GGGaGet(templateRequest, @selector(localExtension)));
+    objc_setAssociatedObject(request, &GGGaInternalRequestKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return request;
+}
+
+static void GGGaObservedSend(id self, SEL command, id message, id listener, id userData) {
+    GGGaCaptureSend(self, message, NO);
+    GGGaOriginalSend(self, command, message, listener, userData);
+}
+
+static void GGGaObservedBlockSend(id self, SEL command, id message, id progress, id success, id failure, id userData) {
+    GGGaCaptureSend(self, message, YES);
+    GGGaOriginalBlockSend(self, command, message, progress, success, failure, userData);
+}
+
+static void GGGaObservedOnMessage(id self, SEL command, id message) {
+    if ([message isKindOfClass:NSClassFromString(@"PMessage")] &&
+        GGGaGetNumber(message, @selector(isMine)) == 0) {
+        id text = GGGaGet(GGGaGet(message, @selector(content)), @selector(text));
+        if ([text isKindOfClass:NSString.class]) dispatch_async(dispatch_get_main_queue(), ^{ GGGaLastIncomingText = [text copy]; });
+    }
+    GGGaOriginalOnMessage(self, command, message);
+}
+
+static void GGGaInstallSendObserver(void) {
+    Class service = objc_getClass("AIMPubMsgService");
+    if (service && !GGGaSendHookInstalled) {
+        Method method = class_getInstanceMethod(service, @selector(sendMessage:listener:userData:));
+        if (method && strcmp(method_getTypeEncoding(method), "v40@0:8@16@24@32") == 0) {
+            GGGaOriginalSend = (void (*)(id, SEL, id, id, id))method_setImplementation(method, (IMP)GGGaObservedSend);
+            GGGaSendHookInstalled = GGGaOriginalSend != NULL;
+        }
+    }
+    if (service && !GGGaBlockSendHookInstalled) {
+        Method method = class_getInstanceMethod(service, @selector(sendMessageWithBlock:onProgress:onSuccess:onFailure:userData:));
+        if (method && strcmp(method_getTypeEncoding(method), "v56@0:8@16@?24@?32@?40@48") == 0) {
+            GGGaOriginalBlockSend = (void (*)(id, SEL, id, id, id, id, id))method_setImplementation(method, (IMP)GGGaObservedBlockSend);
+            GGGaBlockSendHookInstalled = GGGaOriginalBlockSend != NULL;
+        }
+    }
+    Class manager = objc_getClass("AIMManager");
+    if (manager && !GGGaIncomingHookInstalled) {
+        Method method = class_getInstanceMethod(manager, @selector(onMessage:));
+        if (method && strcmp(method_getTypeEncoding(method), "v24@0:8@16") == 0) {
+            GGGaOriginalOnMessage = (void (*)(id, SEL, id))method_setImplementation(method, (IMP)GGGaObservedOnMessage);
+            GGGaIncomingHookInstalled = GGGaOriginalOnMessage != NULL;
+        }
+    }
+}
+
 @interface GGGaTestOverlay : UIView <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIButton *bubble;
+@property(nonatomic, strong) UIView *panel;
+@property(nonatomic, strong) UILabel *statusLabel;
 @property(nonatomic, assign) BOOL positioned;
+- (void)updateStatus;
+- (void)sendTestImage:(BOOL)image;
 @end
 
 @implementation GGGaTestOverlay
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        GGGaInstallSendObserver();
         self.backgroundColor = UIColor.clearColor;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.bubble = [UIButton buttonWithType:UIButtonTypeCustom];
         self.bubble.frame = CGRectMake(0, 0, 56, 56);
         self.bubble.backgroundColor = [UIColor colorWithRed:1 green:0.81 blue:0.18 alpha:1];
-        [self.bubble setTitle:@"嘎" forState:UIControlStateNormal];
+        [self.bubble setTitle:@"测试" forState:UIControlStateNormal];
         [self.bubble setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
-        self.bubble.titleLabel.font = [UIFont boldSystemFontOfSize:23];
+        self.bubble.titleLabel.font = [UIFont boldSystemFontOfSize:15];
         self.bubble.layer.cornerRadius = 28;
         self.bubble.layer.shadowColor = UIColor.blackColor.CGColor;
         self.bubble.layer.shadowOpacity = 0.22;
         self.bubble.layer.shadowRadius = 5;
         self.bubble.layer.shadowOffset = CGSizeMake(0, 2);
-        self.bubble.accessibilityLabel = @"GGGaTools 悬浮测试按钮";
-        [self.bubble addTarget:self action:@selector(showTest) forControlEvents:UIControlEventTouchUpInside];
+        self.bubble.accessibilityLabel = @"打开消息功能测试面板";
+        [self.bubble addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
         [self addSubview:self.bubble];
+        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 288)];
+        self.panel.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.98];
+        self.panel.layer.cornerRadius = 14;
+        self.panel.layer.shadowColor = UIColor.blackColor.CGColor;
+        self.panel.layer.shadowOpacity = 0.3;
+        self.panel.layer.shadowRadius = 8;
+        self.panel.hidden = YES;
+        [self addSubview:self.panel];
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
+        title.text = @"消息功能测试 0.3";
+        title.font = [UIFont boldSystemFontOfSize:18];
+        [self.panel addSubview:title];
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
+        self.statusLabel.numberOfLines = 0;
+        self.statusLabel.font = [UIFont systemFontOfSize:12];
+        self.statusLabel.textColor = UIColor.darkGrayColor;
+        [self.panel addSubview:self.statusLabel];
+        NSArray<NSString *> *titles = @[@"刷新状态", @"直接发文字", @"复用图片直发", @"上一条对方消息", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"updateStatus", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        for (NSUInteger i = 0; i < titles.count; i++) {
+            UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+            button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
+            button.backgroundColor = [UIColor colorWithWhite:0.89 alpha:1];
+            button.layer.cornerRadius = 7;
+            [button setTitle:titles[i] forState:UIControlStateNormal];
+            button.titleLabel.font = [UIFont systemFontOfSize:14];
+            [button addTarget:self action:NSSelectorFromString(actions[i]) forControlEvents:UIControlEventTouchUpInside];
+            [self.panel addSubview:button];
+        }
     }
     return self;
 }
@@ -46,6 +223,9 @@
         self.positioned = YES;
     }
     self.bubble.center = [self clampedCenter:self.bubble.center];
+    CGFloat x = MIN(MAX(8, self.bubble.center.x - self.panel.bounds.size.width), MAX(8, self.bounds.size.width - self.panel.bounds.size.width - 8));
+    CGFloat y = MIN(MAX(self.safeAreaInsets.top + 8, self.bubble.center.y - 115), MAX(self.safeAreaInsets.top + 8, self.bounds.size.height - self.safeAreaInsets.bottom - self.panel.bounds.size.height - 8));
+    self.panel.frame = CGRectMake(x, y, self.panel.bounds.size.width, self.panel.bounds.size.height);
 }
 // Only the button receives touches. Chat fields and scrolling remain reachable.
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -55,9 +235,10 @@
 - (void)drag:(UIPanGestureRecognizer *)pan {
     CGPoint delta = [pan translationInView:self];
     self.bubble.center = [self clampedCenter:CGPointMake(self.bubble.center.x + delta.x, self.bubble.center.y + delta.y)];
+    [self setNeedsLayout];
     [pan setTranslation:CGPointZero inView:self];
 }
-- (void)showTest {
+- (UIViewController *)presentingController {
     UIViewController *controller = self.window.rootViewController;
     while (controller) {
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
@@ -72,15 +253,70 @@
             controller = next;
         } else { break; }
     }
-    if (!controller || [controller isKindOfClass:UIAlertController.class] || !controller.view.window) return;
-    NSString *bundle = NSBundle.mainBundle.bundleIdentifier ?: @"unknown";
-    NSString *message = [NSString stringWithFormat:@"悬浮按钮已运行 ✅\n版本：0.1.0\nApp：%@\niOS：%@\n\n请测试拖动、切换页面、后台返回和输入聊天。", bundle, UIDevice.currentDevice.systemVersion];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GGGaTools 注入测试" message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"复制测试信息" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        UIPasteboard.generalPasteboard.string = message;
-    }]];
+    if (!controller || [controller isKindOfClass:UIAlertController.class] || !controller.view.window) return nil;
+    return controller;
+}
+- (void)showNotice:(NSString *)message {
+    UIViewController *controller = [self presentingController];
+    if (!controller) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GGGaTools · 发送测试" message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [controller presentViewController:alert animated:YES completion:nil];
+}
+- (void)togglePanel {
+    self.panel.hidden = !self.panel.hidden;
+    if (!self.panel.hidden) [self updateStatus];
+}
+- (void)updateStatus {
+    NSString *session = GGGaLatestAppCid.length > 8 ? [GGGaLatestAppCid substringFromIndex:GGGaLatestAppCid.length - 8] : (GGGaLatestAppCid ?: @"无");
+    self.statusLabel.text = [NSString stringWithFormat:@"SDK 监听：文字 %@ / 图片 %@ / 接收 %@\n已观察原生发送：%d 次；最近会话尾号：%@\n文字校准：%@；图片校准：%@\n请先在目标测试会话各手动发送一次文字和图片。", GGGaSendHookInstalled || GGGaBlockSendHookInstalled ? @"已安装" : @"未安装", GGGaImageTemplate ? @"已捕获" : @"待捕获", GGGaIncomingHookInstalled ? @"已安装" : @"未安装", atomic_load(&GGGaNativeSendCount), session, GGGaTextTemplate ? @"有" : @"无", GGGaImageTemplate ? @"有" : @"无"];
+}
+- (void)clearCalibration {
+    GGGaTextTemplate = nil;
+    GGGaImageTemplate = nil;
+    GGGaTextService = nil;
+    GGGaImageService = nil;
+    GGGaLatestAppCid = nil;
+    GGGaLastCalibrationAt = nil;
+    GGGaLastIncomingText = nil;
+    [self updateStatus];
+}
+- (void)sendTextTest { [self sendTestImage:NO]; }
+- (void)sendImageTest { [self sendTestImage:YES]; }
+- (void)sendTestImage:(BOOL)image {
+    NSString *reason = nil;
+    id templateRequest = image ? GGGaImageTemplate : GGGaTextTemplate;
+    id service = image ? GGGaImageService : GGGaTextService;
+    BOOL usesBlock = image ? GGGaImageUsesBlock : GGGaTextUsesBlock;
+    id request = GGGaMakeRequest(templateRequest, image, &reason);
+    if (!request || !service || (usesBlock ? !GGGaBlockSendHookInstalled : !GGGaSendHookInstalled)) {
+        [self showNotice:reason ?: @"发送服务尚未捕获，请在目标测试会话手动发送一次后刷新状态。"];
+        return;
+    }
+    UIViewController *controller = [self presentingController];
+    if (!controller) return;
+    NSString *session = GGGaLatestAppCid.length > 8 ? [GGGaLatestAppCid substringFromIndex:GGGaLatestAppCid.length - 8] : GGGaLatestAppCid;
+    NSString *detail = image ? @"复用该会话最近一次手动发送的图片媒体。" : GGGaDirectText;
+    NSString *message = [NSString stringWithFormat:@"将直接调用消息 SDK，向最近校准会话（尾号 %@）发送：\n%@\n\n请确认仍在该测试会话。点击发送后无法由插件撤回。", session, detail];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:image ? @"确认直接发送图片" : @"确认直接发送文字" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"直接发送" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        @try {
+            GGGaInternalSend = YES;
+            if (usesBlock) GGGaOriginalBlockSend(service, @selector(sendMessageWithBlock:onProgress:onSuccess:onFailure:userData:), request, nil, nil, nil, nil);
+            else GGGaOriginalSend(service, @selector(sendMessage:listener:userData:), request, nil, nil);
+            GGGaInternalSend = NO;
+            [self showNotice:@"已调用消息 SDK。请检查聊天中是否出现消息及对方是否收到；此提示不代表服务端发送成功。"];
+        } @catch (NSException *exception) {
+            GGGaInternalSend = NO;
+            [self showNotice:[NSString stringWithFormat:@"SDK 调用异常：%@", exception.name]];
+        }
+    }]];
+    [controller presentViewController:alert animated:YES completion:nil];
+}
+- (void)showLastIncoming {
+    NSString *message = GGGaLastIncomingText;
+    [self showNotice:message.length ? [NSString stringWithFormat:@"最近捕获的对方文字（尚不能证明属于当前会话）：\n%@", message] : @"尚未捕获对方文字。请让测试会话中的对方发来一条新消息，再点此按钮。当前版本可能走另一条接收路径。"];
 }
 @end
 
@@ -109,7 +345,7 @@
 - (void)onNotification:(NSNotification *)notification {
     dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; });
 }
-- (void)onTimer:(NSTimer *)timer { [self refresh]; }
+- (void)onTimer:(NSTimer *)timer { GGGaInstallSendObserver(); [self refresh]; }
 - (void)attachToWindow:(UIWindow *)window {
     if (!window || window.hidden || window.alpha < 0.01 || !window.rootViewController || window.windowLevel != UIWindowLevelNormal) return;
     GGGaTestOverlay *overlay = [self.overlays objectForKey:window];
@@ -150,7 +386,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.1.0 loaded");
+            NSLog(@"[GGGaTools] 0.3.0 message test loaded");
         });
     }
 }
