@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <stdatomic.h>
+#include <dlfcn.h>
 #include <string.h>
 
 // A diagnostic build: no message contents or recipient identifiers are logged.
@@ -35,6 +36,83 @@ static NSString *GGGaLastIncomingText;
 static void (*GGGaOriginalSend)(id, SEL, id, id, id);
 static void (*GGGaOriginalBlockSend)(id, SEL, id, id, id, id, id);
 static void (*GGGaOriginalOnMessage)(id, SEL, id);
+
+// Each probe forwards the original arguments and records only a call count.
+typedef struct {
+    const char *className;
+    const char *selectorName;
+    const char *encoding;
+    atomic_uint hits;
+    unsigned baseline;
+    IMP original;
+} GGGaCountProbe;
+
+static GGGaCountProbe GGGaBridgeDispatch = {"FlutterServiceCallDispather", "dispatch:result:", "v32@0:8@16@?24"};
+static GGGaCountProbe GGGaBridgeSend = {"FlutterMessageClient", "send:result:", "v32@0:8@16@?24"};
+static GGGaCountProbe GGGaAlternateReceive = {"AIMManager", "onReceived:entend:", "v32@0:8@16@24"};
+static GGGaCountProbe GGGaLocalHistory = {"AIMPubMsgService", "listPreviousLocalMsgs:cursor:count:listener:", "v44@0:8@16q24i32@36"};
+static GGGaCountProbe GGGaRemoteHistory = {"AIMPubMsgService", "listPreviousMsgs:cursor:count:listener:", "v44@0:8@16q24i32@36"};
+static GGGaCountProbe GGGaLocalHistoryBlock = {"AIMPubMsgService", "listPreviousLocalMsgsWithBlock:cursor:count:onSuccess:onFailure:", "v52@0:8@16q24i32@?36@?44"};
+static GGGaCountProbe GGGaRemoteHistoryBlock = {"AIMPubMsgService", "listPreviousMsgsWithBlock:cursor:count:onSuccess:onFailure:", "v52@0:8@16q24i32@?36@?44"};
+
+static void GGGaInstallCountProbe(GGGaCountProbe *probe, IMP replacement) {
+    if (probe->original) return;
+    Class cls = objc_getClass(probe->className);
+    if (!cls) return;
+    SEL selector = sel_registerName(probe->selectorName);
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method || strcmp(method_getTypeEncoding(method), probe->encoding) != 0) return;
+    probe->original = method_getImplementation(method);
+    class_replaceMethod(cls, selector, replacement, probe->encoding);
+}
+
+static void GGGaInstallCountProbes(void) {
+    GGGaCountProbe *objectProbes[] = {&GGGaBridgeDispatch, &GGGaBridgeSend, &GGGaAlternateReceive};
+    for (NSUInteger i = 0; i < sizeof(objectProbes) / sizeof(*objectProbes); i++) {
+        GGGaCountProbe *probe = objectProbes[i];
+        if (probe->original) continue;
+        IMP imp = imp_implementationWithBlock(^(id object, id arg, id result) {
+            atomic_fetch_add(&probe->hits, 1);
+            ((void (*)(id, SEL, id, id))probe->original)(object, sel_registerName(probe->selectorName), arg, result);
+        });
+        GGGaInstallCountProbe(probe, imp);
+        if (!probe->original) imp_removeBlock(imp);
+    }
+
+    GGGaCountProbe *listenerProbes[] = {&GGGaLocalHistory, &GGGaRemoteHistory};
+    for (NSUInteger i = 0; i < sizeof(listenerProbes) / sizeof(*listenerProbes); i++) {
+        GGGaCountProbe *probe = listenerProbes[i];
+        if (probe->original) continue;
+        IMP imp = imp_implementationWithBlock(^(id object, id conversation, long long cursor, int limit, id listener) {
+            atomic_fetch_add(&probe->hits, 1);
+            ((void (*)(id, SEL, id, long long, int, id))probe->original)(object, sel_registerName(probe->selectorName), conversation, cursor, limit, listener);
+        });
+        GGGaInstallCountProbe(probe, imp);
+        if (!probe->original) imp_removeBlock(imp);
+    }
+
+    GGGaCountProbe *blockProbes[] = {&GGGaLocalHistoryBlock, &GGGaRemoteHistoryBlock};
+    for (NSUInteger i = 0; i < sizeof(blockProbes) / sizeof(*blockProbes); i++) {
+        GGGaCountProbe *probe = blockProbes[i];
+        if (probe->original) continue;
+        IMP imp = imp_implementationWithBlock(^(id object, id conversation, long long cursor, int limit, id success, id failure) {
+            atomic_fetch_add(&probe->hits, 1);
+            ((void (*)(id, SEL, id, long long, int, id, id))probe->original)(object, sel_registerName(probe->selectorName), conversation, cursor, limit, success, failure);
+        });
+        GGGaInstallCountProbe(probe, imp);
+        if (!probe->original) imp_removeBlock(imp);
+    }
+}
+
+static GGGaCountProbe *const GGGaCountProbes[] = {
+    &GGGaBridgeDispatch, &GGGaBridgeSend, &GGGaAlternateReceive,
+    &GGGaLocalHistory, &GGGaLocalHistoryBlock, &GGGaRemoteHistory, &GGGaRemoteHistoryBlock
+};
+
+static NSString *GGGaProbeResult(GGGaCountProbe *probe) {
+    if (!probe->original) return @"未安装";
+    return [NSString stringWithFormat:@"+%u", atomic_load(&probe->hits) - probe->baseline];
+}
 
 static id GGGaGet(id object, SEL selector) {
     return object && [object respondsToSelector:selector] ? ((id (*)(id, SEL))objc_msgSend)(object, selector) : nil;
@@ -216,6 +294,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
     self = [super initWithFrame:frame];
     if (self) {
         GGGaInstallSendObserver();
+        GGGaInstallCountProbes();
         self.backgroundColor = UIColor.clearColor;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.bubble = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -235,7 +314,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
         [self addSubview:self.bubble];
-        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 328)];
+        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 370)];
         self.panel.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.98];
         self.panel.layer.cornerRadius = 14;
         self.panel.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -244,7 +323,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.panel.hidden = YES;
         [self addSubview:self.panel];
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
-        title.text = @"消息功能测试 0.3.2";
+        title.text = @"消息功能测试 0.3.3";
         title.font = [UIFont boldSystemFontOfSize:18];
         [self.panel addSubview:title];
         self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
@@ -252,8 +331,8 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.statusLabel.font = [UIFont systemFontOfSize:12];
         self.statusLabel.textColor = UIColor.darkGrayColor;
         [self.panel addSubview:self.statusLabel];
-        NSArray<NSString *> *titles = @[@"检查网页容器", @"路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
-        NSArray<NSString *> *actions = @[@"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        NSArray<NSString *> *titles = @[@"多路径结果", @"记录测试起点", @"检查网页容器", @"旧路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"showParallelDiagnostics", @"recordProbeBaseline", @"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
         for (NSUInteger i = 0; i < titles.count; i++) {
             UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
             button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
@@ -364,6 +443,26 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         (unsigned long)flutterViews.count, [flutterViews componentsJoinedByString:@"\n"]];
     [self showNotice:message];
 }
+- (void)recordProbeBaseline {
+    GGGaInstallCountProbes();
+    for (NSUInteger i = 0; i < sizeof(GGGaCountProbes) / sizeof(*GGGaCountProbes); i++) {
+        GGGaCountProbe *probe = GGGaCountProbes[i];
+        probe->baseline = atomic_load(&probe->hits);
+    }
+    self.panel.hidden = YES;
+}
+- (void)showParallelDiagnostics {
+    NSString *message = [NSString stringWithFormat:
+        @"起点之后的调用次数\n\nFlutter 桥接：分发 %@ / 消息 %@\n原生备用接收：%@\n本地历史：监听器 %@ / Block %@\n远端历史：监听器 %@ / Block %@\n\nFFI 符号可查找性（非调用次数）\n发送 %@ / 接收注册 %@ / 历史 %@",
+        GGGaProbeResult(&GGGaBridgeDispatch), GGGaProbeResult(&GGGaBridgeSend),
+        GGGaProbeResult(&GGGaAlternateReceive), GGGaProbeResult(&GGGaLocalHistory),
+        GGGaProbeResult(&GGGaLocalHistoryBlock), GGGaProbeResult(&GGGaRemoteHistory),
+        GGGaProbeResult(&GGGaRemoteHistoryBlock),
+        dlsym(RTLD_DEFAULT, "SendMessage") ? @"是" : @"否",
+        dlsym(RTLD_DEFAULT, "AddMsgListener") ? @"是" : @"否",
+        dlsym(RTLD_DEFAULT, "ListPreviousMessage") ? @"是" : @"否"];
+    [self showNotice:message];
+}
 - (void)sendTextTest { [self sendTestImage:NO]; }
 - (void)sendImageTest { [self sendTestImage:YES]; }
 - (void)sendTestImage:(BOOL)image {
@@ -466,7 +565,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.2 message test loaded");
+            NSLog(@"[GGGaTools] 0.3.3 message test loaded");
         });
     }
 }
