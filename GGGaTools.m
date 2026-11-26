@@ -1,7 +1,20 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 
-// v0.1.0: visible injection test, using public UIKit APIs only.
+// v0.2.0: fill a test draft in the focused chat input. Sending stays in the host UI.
+static NSString *const GGGaDraftText = @"【GGGaTools测试】这是一条手动发送测试消息";
+
+static UIView *GGGaFindFlutterTextResponder(UIView *view) {
+    if (view.isFirstResponder &&
+        [view conformsToProtocol:@protocol(UIKeyInput)] &&
+        [NSStringFromClass(view.class) containsString:@"FlutterTextInput"]) return view;
+    for (UIView *child in view.subviews) {
+        UIView *found = GGGaFindFlutterTextResponder(child);
+        if (found) return found;
+    }
+    return nil;
+}
+
 @interface GGGaTestOverlay : UIView <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIButton *bubble;
 @property(nonatomic, assign) BOOL positioned;
@@ -16,16 +29,16 @@
         self.bubble = [UIButton buttonWithType:UIButtonTypeCustom];
         self.bubble.frame = CGRectMake(0, 0, 56, 56);
         self.bubble.backgroundColor = [UIColor colorWithRed:1 green:0.81 blue:0.18 alpha:1];
-        [self.bubble setTitle:@"嘎" forState:UIControlStateNormal];
+        [self.bubble setTitle:@"填入" forState:UIControlStateNormal];
         [self.bubble setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
-        self.bubble.titleLabel.font = [UIFont boldSystemFontOfSize:23];
+        self.bubble.titleLabel.font = [UIFont boldSystemFontOfSize:15];
         self.bubble.layer.cornerRadius = 28;
         self.bubble.layer.shadowColor = UIColor.blackColor.CGColor;
         self.bubble.layer.shadowOpacity = 0.22;
         self.bubble.layer.shadowRadius = 5;
         self.bubble.layer.shadowOffset = CGSizeMake(0, 2);
-        self.bubble.accessibilityLabel = @"GGGaTools 悬浮测试按钮";
-        [self.bubble addTarget:self action:@selector(showTest) forControlEvents:UIControlEventTouchUpInside];
+        self.bubble.accessibilityLabel = @"将测试文字填入当前输入框，不自动发送";
+        [self.bubble addTarget:self action:@selector(fillDraft) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
@@ -57,7 +70,7 @@
     self.bubble.center = [self clampedCenter:CGPointMake(self.bubble.center.x + delta.x, self.bubble.center.y + delta.y)];
     [pan setTranslation:CGPointZero inView:self];
 }
-- (void)showTest {
+- (UIViewController *)presentingController {
     UIViewController *controller = self.window.rootViewController;
     while (controller) {
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
@@ -72,15 +85,35 @@
             controller = next;
         } else { break; }
     }
-    if (!controller || [controller isKindOfClass:UIAlertController.class] || !controller.view.window) return;
-    NSString *bundle = NSBundle.mainBundle.bundleIdentifier ?: @"unknown";
-    NSString *message = [NSString stringWithFormat:@"悬浮按钮已运行 ✅\n版本：0.1.0\nApp：%@\niOS：%@\n\n请测试拖动、切换页面、后台返回和输入聊天。", bundle, UIDevice.currentDevice.systemVersion];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GGGaTools 注入测试" message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"复制测试信息" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        UIPasteboard.generalPasteboard.string = message;
-    }]];
+    if (!controller || [controller isKindOfClass:UIAlertController.class] || !controller.view.window) return nil;
+    return controller;
+}
+- (void)showNotice:(NSString *)message {
+    UIViewController *controller = [self presentingController];
+    if (!controller) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GGGaTools · 发送测试" message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
     [controller presentViewController:alert animated:YES completion:nil];
+}
+- (void)fillDraft {
+    // A focused UIKeyInput is the only target. Do not infer a recipient or call an internal send API.
+    UIView *responder = nil;
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window.windowScene && self.window.windowScene && window.windowScene != self.window.windowScene) continue;
+        responder = GGGaFindFlutterTextResponder(window);
+        if (responder) break;
+    }
+    if (!responder) {
+        [self showNotice:@"请先进入一个测试聊天，点输入框让键盘出现，再点“填入”。不会自动发送。"];
+        return;
+    }
+    id<UIKeyInput> input = (id<UIKeyInput>)responder;
+    if ([input hasText]) {
+        [self showNotice:@"输入框已有内容，请先手动清空，再点“填入”。现有草稿未被改动。"];
+        return;
+    }
+    [input insertText:GGGaDraftText];
+    NSLog(@"[GGGaTools] Test draft inserted into %@", NSStringFromClass(responder.class));
 }
 @end
 
@@ -150,7 +183,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.1.0 loaded");
+            NSLog(@"[GGGaTools] 0.2.0 draft test loaded");
         });
     }
 }

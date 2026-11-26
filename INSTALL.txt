@@ -1,54 +1,16 @@
-GGGaTools 0.1.0 — 轻松签注入测试
+GGGaTools 0.2.0 — Flutter 聊天输入框测试
 
-本压缩包是源代码，不是已编译的 dylib，也不是 IPA。
-目标：iOS/iPadOS 13+、arm64 真机。只能在被注入的 App 内显示。
+编译：将本目录内容放在 GitHub 仓库根目录；Actions → Build GGGaTools → 下载 GGGaTools-iOS-arm64 → 解压得到 GGGaTools.dylib。
 
-一、上传 GitHub
-1. 解压 GGGaTools-source.zip。
-2. 将 GGGaTools 文件夹内的内容上传到你的 GGGaTools 仓库根目录。
-   根目录应直接看到 GGGaTools.m、build.sh、README.md、INSTALL.txt。
-   不要将整个外层 GGGaTools 文件夹作为仓库内的子目录上传。
-3. 必须有 .github/workflows/build.yml。
-   Windows 若不方便上传 .github 文件夹：
-   在仓库点 Add file → Create new file，文件名输入：
-   .github/workflows/build.yml
-   将包内 GitHub-workflow-copy.txt 的全部内容粘贴进去并提交。
-   GitHub-workflow-copy.txt 只是方便复制；真正执行的是上面的 yml 文件。
+ESign：导入动态库和目标 IPA 的测试副本，在签名设置里选择注入 GGGaTools.dylib，然后重签安装。只导入文件列表不等于注入成功。原始 IPA 请另行保存。
 
-二、编译和下载
-1. 提交文件后，打开仓库 Actions → Build GGGaTools。
-2. 若没有自动启动：打开该流程，点 Run workflow。
-3. 等待绿色成功标记，在本次运行页面下方 Artifacts 下载
-   GGGaTools-iOS-arm64，解压得到 GGGaTools.dylib。
-   下载构建产物通常需要登录 GitHub。
-4. 如失败，打开失败的 Build iOS dynamic library 步骤，把日志发给我。
-   若仓库完全没有这个流程，先检查 .github/workflows/build.yml 的路径。
+操作：进入自己的测试聊天 → 点击聊天输入框使键盘出现 → 确认输入框为空 → 点击黄色“填入”按钮。它只写入固定测试文本，不会发送。确认聊天对象和内容后，手动点击闲鱼的发送按钮。
 
-三、轻松签（不同版本菜单名称可能不同）
-1. 导入 GGGaTools.dylib 和你有权修改、可重签名的目标 IPA。
-2. 在目标 IPA 的签名设置中找到“添加/注入动态库”一类选项。
-3. 选择 GGGaTools.dylib，确认它加入待签名包，再签名整个 App 并安装。
-   单独把 dylib 导入文件列表不代表注入成功；需要写入 App 加载依赖。
-   重签名使用你已有的有效证书和描述文件，本项目无需把证书上传 GitHub。
-4. 打开 App，等待约 2 秒；屏幕右侧应出现黄色“嘎”按钮。
+成功标准：按钮出现并可拖动；固定文字进入原生聊天输入位置；手动发送成功；已有草稿不会被覆盖；无焦点时显示提示。
 
-四、验收
-• 黄色按钮出现，能拖动。
-• 点击弹出“GGGaTools 注入测试”，显示版本和 App 标识。
-• 页面切换、后台返回后按钮仍能显示。
-• 点按钮以外的位置可正常聊天、输入和滚动。
-• 横竖屏后按钮仍在可见区域内。
-• 只有点击“复制测试信息”才向剪贴板写入文本。
+若按钮不显示：确认动态库确实被注入并重签，完全退出 App 后再启动。
+若点击后提示未找到输入框：保持聊天页键盘打开，截图提示与输入框状态；可能是当前闲鱼版本采用不同输入视图。
+若文本出现但不能发送：说明输入和提交路径不同，记录画面供后续分析。
+若出现闪退：先用不含 GGGaTools 的同源 IPA 重签安装对照，保存崩溃日志和 iOS 版本。
 
-当前版本没有门店查询、网络请求、自动读取剪贴板或自动发送消息。
-确认悬浮按钮可用后，再接 https://aixiya.cn/api/mendian/?q=搜索内容。
-
-限制与排查
-• 不是系统全局悬浮窗，不能覆盖未注入的其他 App。
-• 编译成功不能保证目标 App 接受注入；加密、签名、完整性检查等都会影响运行。
-• 没按钮：确认注入依赖和签名都完成，完全退出 App 后重开。
-• 闪退：用未注入的同源 IPA 重签名作对照，提供系统版本、目标 App 版本和崩溃日志。
-• 需要卸载重装时，先自行备份该 App 的本地数据。
-• 回退：使用未注入此库的 IPA 重新签名安装。
-
-本包已检查文件结构和脚本语法；尚未经过 Xcode 编译和真机测试。
+当前版本不会自动发送消息、访问网络、读取剪贴板或自动回复。

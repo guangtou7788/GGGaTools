@@ -1,37 +1,21 @@
-# GGGaTools
+# GGGaTools 0.2.0 — 聊天输入框测试
 
-iOS App 内悬浮按钮注入测试，版本 0.1.0。
+本版用于验证注入插件能否将文字写入闲鱼的 Flutter 聊天输入框。黄色“填入”悬浮按钮支持拖动。点击后，仅在当前焦点是 Flutter 文字输入视图、且输入框为空时，写入固定文本：`【GGGaTools测试】这是一条手动发送测试消息`。
 
-黄色「嘎」按钮支持拖动，点击显示测试信息。用于先确认 dylib 加载和 UIKit 悬浮交互，再接入门店查询。
-
-## 快速开始
-
-1. 将本目录内容上传至 GitHub 仓库根目录，包含 `.github/workflows/build.yml`。
-2. 打开 **Actions → Build GGGaTools**，等待成功后下载 **GGGaTools-iOS-arm64**。
-3. 解压取得 `GGGaTools.dylib`，通过轻松签注入目标 IPA，重签名安装。
-4. 打开 App 等待约 2 秒，测试按钮显示、拖动、点击、页面切换和聊天输入。
-
-完整操作和排查见 [INSTALL.txt](INSTALL.txt)。无法上传隐藏目录时，可按说明复制 [GitHub-workflow-copy.txt](GitHub-workflow-copy.txt) 创建工作流。
+插件不会点击发送、调用消息接口、读取聊天内容或剪贴板。请只在自己的测试会话中操作，并在确认收件人和文本后，手动点击闲鱼的发送按钮。输入框原有文字不会被覆盖。
 
 ## 构建
 
-```bash
-bash build.sh
-```
+仓库根目录包含 `.github/workflows/build.yml`。提交到 GitHub 后，打开 Actions → Build GGGaTools，下载 `GGGaTools-iOS-arm64` 构建产物，解压取得 `GGGaTools.dylib`。也可在 macOS + Xcode 环境运行 `bash build.sh`。
 
-需要 macOS、Xcode 和 iPhoneOS SDK。使用系统 clang，输出 iOS 13+ / arm64 dylib，不依赖 Theos、Substrate、第三方 SDK 或 GitHub Secrets。产物经临时签名，注入时需要随目标 App 重新签名。
+输出为 iOS 13+、arm64 的独立动态库，不依赖 Theos 或 Substrate。注入目标 IPA 后需与 App 一起由 ESign 重新签名。完整操作见 [INSTALL.txt](INSTALL.txt)。
 
-## 实现和范围
+## 验收
 
-- 使用 constructor 在主线程启动，在前台普通 App 窗口添加透明视图；不替换宿主方法。
-- 按钮外的触摸透传；监听 App 和 Scene 激活，并每 2 秒在前台检查按钮。
-- 没有网络请求，不读取剪贴板；用户点“复制测试信息”时写入版本与 App 标识。
-- 仅显示在被注入 App 内；不提供系统全局悬浮窗，不适用于模拟器或 App 扩展。
-- 不保证所有 App 兼容；需要可重签名的 IPA 和有效签名材料。
+1. 用 ESign 将 `GGGaTools.dylib` 注入目标 IPA 的测试副本，重签并安装。
+2. 在自己的测试聊天中点击输入框，让键盘出现；确认输入框为空。
+3. 点击“填入”。应出现固定测试文本，但此时消息尚未发送。
+4. 核对会话和文本后，手动点击闲鱼发送。记录文字是否成功发出。
+5. 返回聊天页再测一次：输入框已有内容时插件应拒绝写入；在非输入状态点击时应显示提示。
 
-当前交付为源代码。已做结构与脚本语法检查，未进行 Xcode 编译、轻松签注入或真机验证；以你的 Actions 日志和真机结果为准。
-
-## 参考
-
-- [Apple UIWindowScene](https://developer.apple.com/documentation/uikit/uiwindowscene)
-- [GitHub 构建产物下载说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+这一步只验证输入路径。直接调用消息 SDK 发送、自动回复和发图，需要单独确认会话标识及发送参数。
