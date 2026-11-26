@@ -5,7 +5,8 @@
       "id": "home",
       "title": "打开首页",
       "type": "web",
-      "url": "https://aixiya.cn/"
+      "url": "https://aixiya.cn/",
+      "zoom": 75
     },
     {
       "id": "store-search",
