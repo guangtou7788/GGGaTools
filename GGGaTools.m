@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <WebKit/WebKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -54,6 +55,21 @@ static GGGaCountProbe GGGaLocalHistory = {"AIMPubMsgService", "listPreviousLocal
 static GGGaCountProbe GGGaRemoteHistory = {"AIMPubMsgService", "listPreviousMsgs:cursor:count:listener:", "v44@0:8@16q24i32@36"};
 static GGGaCountProbe GGGaLocalHistoryBlock = {"AIMPubMsgService", "listPreviousLocalMsgsWithBlock:cursor:count:onSuccess:onFailure:", "v52@0:8@16q24i32@?36@?44"};
 static GGGaCountProbe GGGaRemoteHistoryBlock = {"AIMPubMsgService", "listPreviousMsgsWithBlock:cursor:count:onSuccess:onFailure:", "v52@0:8@16q24i32@?36@?44"};
+static GGGaCountProbe GGGaBridgeHandler = {"FlutterServiceCallHandler", "handleMethodCall:args:result:", "B40@0:8@16@24@?32"};
+static NSObject *GGGaBridgeNamesLock;
+static NSMutableDictionary<NSString *, NSNumber *> *GGGaDispatchNames;
+static NSMutableDictionary<NSString *, NSNumber *> *GGGaHandledNames;
+
+static void GGGaRecordBridgeName(NSMutableDictionary<NSString *, NSNumber *> *names, id name) {
+    if (![name isKindOfClass:NSString.class] || [name length] == 0 || [name length] > 90) return;
+    NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-"] invertedSet];
+    if ([name rangeOfCharacterFromSet:invalid].location != NSNotFound) return;
+    @synchronized (GGGaBridgeNamesLock) {
+        NSNumber *count = names[name];
+        if (count || names.count < 32) names[name] = @(count.unsignedIntValue + 1);
+    }
+}
 
 static void GGGaInstallCountProbe(GGGaCountProbe *probe, IMP replacement) {
     if (probe->original) return;
@@ -67,16 +83,43 @@ static void GGGaInstallCountProbe(GGGaCountProbe *probe, IMP replacement) {
 }
 
 static void GGGaInstallCountProbes(void) {
+    if (!GGGaBridgeNamesLock) {
+        GGGaBridgeNamesLock = [NSObject new];
+        GGGaDispatchNames = [NSMutableDictionary new];
+        GGGaHandledNames = [NSMutableDictionary new];
+    }
     GGGaCountProbe *objectProbes[] = {&GGGaBridgeDispatch, &GGGaBridgeSend, &GGGaAlternateReceive};
     for (NSUInteger i = 0; i < sizeof(objectProbes) / sizeof(*objectProbes); i++) {
         GGGaCountProbe *probe = objectProbes[i];
         if (probe->original) continue;
         IMP imp = imp_implementationWithBlock(^(id object, id arg, id result) {
             atomic_fetch_add(&probe->hits, 1);
+            if (probe == &GGGaBridgeDispatch) {
+                Class callClass = NSClassFromString(@"FlutterMethodCall");
+                SEL methodSelector = sel_registerName("method");
+                if (callClass && [arg isKindOfClass:callClass] && [arg respondsToSelector:methodSelector]) {
+                    id name = ((id (*)(id, SEL))objc_msgSend)(arg, methodSelector);
+                    GGGaRecordBridgeName(GGGaDispatchNames, name);
+                }
+            }
             ((void (*)(id, SEL, id, id))probe->original)(object, sel_registerName(probe->selectorName), arg, result);
         });
         GGGaInstallCountProbe(probe, imp);
         if (!probe->original) imp_removeBlock(imp);
+    }
+    GGGaCountProbe *handler = &GGGaBridgeHandler;
+    if (!handler->original) {
+        IMP imp = imp_implementationWithBlock(^BOOL(id object, id name, id args, id result) {
+            BOOL handled = ((BOOL (*)(id, SEL, id, id, id))handler->original)(
+                object, sel_registerName(handler->selectorName), name, args, result);
+            if (handled) {
+                atomic_fetch_add(&handler->hits, 1);
+                GGGaRecordBridgeName(GGGaHandledNames, name);
+            }
+            return handled;
+        });
+        GGGaInstallCountProbe(handler, imp);
+        if (!handler->original) imp_removeBlock(imp);
     }
 
     GGGaCountProbe *listenerProbes[] = {&GGGaLocalHistory, &GGGaRemoteHistory};
@@ -105,13 +148,29 @@ static void GGGaInstallCountProbes(void) {
 }
 
 static GGGaCountProbe *const GGGaCountProbes[] = {
-    &GGGaBridgeDispatch, &GGGaBridgeSend, &GGGaAlternateReceive,
+    &GGGaBridgeDispatch, &GGGaBridgeHandler, &GGGaBridgeSend, &GGGaAlternateReceive,
     &GGGaLocalHistory, &GGGaLocalHistoryBlock, &GGGaRemoteHistory, &GGGaRemoteHistoryBlock
 };
 
 static NSString *GGGaProbeResult(GGGaCountProbe *probe) {
     if (!probe->original) return @"未安装";
     return [NSString stringWithFormat:@"+%u", atomic_load(&probe->hits) - probe->baseline];
+}
+
+static NSString *GGGaBridgeNameSummary(NSDictionary<NSString *, NSNumber *> *names) {
+    NSArray<NSString *> *keys = [names keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+        return [b compare:a];
+    }];
+    if (keys.count == 0) return @"无可显示的方法名";
+    NSMutableArray<NSString *> *lines = [NSMutableArray new];
+    for (NSString *key in keys) {
+        if (lines.count == 5) break;
+        [lines addObject:[NSString stringWithFormat:@"%@ ×%@", key, names[key]]];
+    }
+    if (keys.count > lines.count) {
+        [lines addObject:[NSString stringWithFormat:@"另有 %lu 种", (unsigned long)(keys.count - lines.count)]];
+    }
+    return [lines componentsJoinedByString:@"\n"];
 }
 
 static id GGGaGet(id object, SEL selector) {
@@ -258,6 +317,75 @@ static void GGGaInstallSendObserver(void) {
     }
 }
 
+@interface GGGaWebPageController : UIViewController <WKNavigationDelegate>
+@property(nonatomic, strong) WKWebView *webView;
+@property(nonatomic, copy) void (^onClose)(void);
+@end
+
+@implementation GGGaWebPageController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"aixiya.cn";
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:@"关闭" style:UIBarButtonItemStylePlain target:self action:@selector(closePage)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(loadPage)];
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+
+    WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
+    self.webView.navigationDelegate = self;
+    self.webView.allowsBackForwardNavigationGestures = YES;
+    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.webView];
+    UILayoutGuide *safeArea = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.webView.topAnchor constraintEqualToAnchor:safeArea.topAnchor],
+        [self.webView.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor],
+        [self.webView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor],
+        [self.webView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor]
+    ]];
+    [self loadPage];
+}
+- (void)loadPage {
+    NSURL *url = self.webView.URL ?: [NSURL URLWithString:@"https://aixiya.cn/"];
+    [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
+}
+- (void)closePage {
+    [self dismissViewControllerAnimated:YES completion:self.onClose];
+}
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
+ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = action.request.URL;
+    if (![url.scheme.lowercaseString isEqualToString:@"https"]) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    if (!action.targetFrame) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        [webView loadRequest:action.request];
+        return;
+    }
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+- (void)showLoadError:(NSError *)error {
+    if (error.code == NSURLErrorCancelled || !self.view.window || self.presentedViewController) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"网页加载失败"
+        message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
+      withError:(NSError *)error {
+    [self showLoadError:error];
+}
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation
+      withError:(NSError *)error {
+    [self showLoadError:error];
+}
+@end
+
 @interface GGGaTestOverlay : UIView <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) UIButton *bubble;
 @property(nonatomic, strong) UIView *panel;
@@ -314,7 +442,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         pan.delegate = self;
         [self.bubble addGestureRecognizer:pan];
         [self addSubview:self.bubble];
-        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 370)];
+        self.panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 310, 412)];
         self.panel.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.98];
         self.panel.layer.cornerRadius = 14;
         self.panel.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -323,7 +451,7 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.panel.hidden = YES;
         [self addSubview:self.panel];
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(14, 8, 280, 26)];
-        title.text = @"消息功能测试 0.3.3";
+        title.text = @"消息功能测试 0.3.4";
         title.font = [UIFont boldSystemFontOfSize:18];
         [self.panel addSubview:title];
         self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, 282, 106)];
@@ -331,8 +459,8 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
         self.statusLabel.font = [UIFont systemFontOfSize:12];
         self.statusLabel.textColor = UIColor.darkGrayColor;
         [self.panel addSubview:self.statusLabel];
-        NSArray<NSString *> *titles = @[@"多路径结果", @"记录测试起点", @"检查网页容器", @"旧路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
-        NSArray<NSString *> *actions = @[@"showParallelDiagnostics", @"recordProbeBaseline", @"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
+        NSArray<NSString *> *titles = @[@"打开网页", @"多路径结果", @"记录测试起点", @"桥接方法明细", @"检查网页容器", @"旧路径诊断", @"直接发文字", @"复用图片直发", @"最近捕获文字", @"清除校准", @"关闭"];
+        NSArray<NSString *> *actions = @[@"openWebsite", @"showParallelDiagnostics", @"recordProbeBaseline", @"showBridgeDetails", @"showRenderDiagnostics", @"showPathDiagnostics", @"sendTextTest", @"sendImageTest", @"showLastIncoming", @"clearCalibration", @"togglePanel"];
         for (NSUInteger i = 0; i < titles.count; i++) {
             UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
             button.frame = CGRectMake(14 + (i % 2) * 146, 151 + (i / 2) * 43, 136, 36);
@@ -403,6 +531,19 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
     self.panel.hidden = !self.panel.hidden;
     if (!self.panel.hidden) [self updateStatus];
 }
+- (void)openWebsite {
+    UIViewController *presenter = [self presentingController];
+    if (!presenter || presenter.isBeingPresented || presenter.isBeingDismissed) return;
+    GGGaWebPageController *page = [GGGaWebPageController new];
+    __weak GGGaTestOverlay *overlay = self;
+    page.onClose = ^{ overlay.bubble.hidden = NO; };
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:page];
+    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    self.panel.hidden = YES;
+    [presenter presentViewController:navigation animated:YES completion:^{
+        overlay.bubble.hidden = YES;
+    }];
+}
 - (void)updateStatus {
     NSString *session = GGGaLatestAppCid.length > 8 ? [GGGaLatestAppCid substringFromIndex:GGGaLatestAppCid.length - 8] : (GGGaLatestAppCid ?: @"无");
     self.statusLabel.text = [NSString stringWithFormat:@"SDK 监听：文字 %@ / 图片 %@ / 接收 %@\n已观察原生发送：%d 次；最近会话尾号：%@\n文字校准：%@；图片校准：%@\n请先在目标测试会话各手动发送一次文字和图片。", GGGaSendHookInstalled || GGGaBlockSendHookInstalled ? @"已安装" : @"未安装", GGGaImageTemplate ? @"已捕获" : @"待捕获", GGGaIncomingHookInstalled ? @"已安装" : @"未安装", atomic_load(&GGGaNativeSendCount), session, GGGaTextTemplate ? @"有" : @"无", GGGaImageTemplate ? @"有" : @"无"];
@@ -445,11 +586,27 @@ static void GGGaCollectRenderViews(UIView *view, UIWindow *window, CGRect visibl
 }
 - (void)recordProbeBaseline {
     GGGaInstallCountProbes();
+    @synchronized (GGGaBridgeNamesLock) {
+        [GGGaDispatchNames removeAllObjects];
+        [GGGaHandledNames removeAllObjects];
+    }
     for (NSUInteger i = 0; i < sizeof(GGGaCountProbes) / sizeof(*GGGaCountProbes); i++) {
         GGGaCountProbe *probe = GGGaCountProbes[i];
         probe->baseline = atomic_load(&probe->hits);
     }
     self.panel.hidden = YES;
+}
+- (void)showBridgeDetails {
+    NSDictionary<NSString *, NSNumber *> *dispatchNames;
+    NSDictionary<NSString *, NSNumber *> *handledNames;
+    @synchronized (GGGaBridgeNamesLock) {
+        dispatchNames = [GGGaDispatchNames copy];
+        handledNames = [GGGaHandledNames copy];
+    }
+    NSString *message = [NSString stringWithFormat:@"分发 %@\n%@\n\n处理成功 %@\n%@",
+        GGGaProbeResult(&GGGaBridgeDispatch), GGGaBridgeNameSummary(dispatchNames),
+        GGGaProbeResult(&GGGaBridgeHandler), GGGaBridgeNameSummary(handledNames)];
+    [self showNotice:message];
 }
 - (void)showParallelDiagnostics {
     NSString *message = [NSString stringWithFormat:
@@ -565,7 +722,7 @@ __attribute__((constructor)) static void GGGaToolsInitialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             static GGGaTestManager *manager;
             if (!manager) manager = [[GGGaTestManager alloc] init];
-            NSLog(@"[GGGaTools] 0.3.3 message test loaded");
+            NSLog(@"[GGGaTools] 0.3.4 message test loaded");
         });
     }
 }

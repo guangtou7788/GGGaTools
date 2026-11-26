@@ -6,7 +6,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
-VERSION=0.3.3
+VERSION=0.3.4
 LIBRARY="GGGaTools-${VERSION}.dylib"
 OUTPUT="build/$LIBRARY"
 mkdir -p build
@@ -14,7 +14,7 @@ xcrun --sdk iphoneos clang \
   -isysroot "$SDK_PATH" -arch arm64 -miphoneos-version-min=13.0 \
   -dynamiclib -fobjc-arc -fblocks -O2 -Wall -Wextra \
   -Wno-unused-parameter -Wno-deprecated-declarations \
-  -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
+  -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics -framework WebKit \
   "-Wl,-install_name,@rpath/$LIBRARY" \
   -Wl,-compatibility_version,1.0 "-Wl,-current_version,$VERSION" \
   GGGaTools.m -o "$OUTPUT"
