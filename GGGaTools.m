@@ -381,8 +381,7 @@ static NSURLSession *GGGaHTTPSession(void) {
     CGFloat height = MAX(0, MIN(CGRectGetHeight(safeArea) - 36, CGRectGetHeight(safeArea) * 0.77));
     CGRect pageFrame = CGRectMake(CGRectGetMidX(safeArea) - width / 2,
         CGRectGetMinY(safeArea) + 18, width, height);
-    self.websitePage.frame = pageFrame;
-    self.storePage.frame = pageFrame;
+    self.activePage.frame = pageFrame;
 }
 // The host receives touches outside the menu when no floating page is open.
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
